@@ -40,3 +40,5 @@ A BepInEx plugin for **SPT 4.1.x** that makes weapon handling feel real: your gu
 ## License
 
 Custom license — free for personal use; **modification and redistribution require written permission**. See [LICENSE](LICENSE). Ported TarkovIRL code retains attribution to adishee.
+
+**Contact for permission:** GitHub issues on this repo, or Discord `Isaiahnohart` (ID `138781947550892032`).
