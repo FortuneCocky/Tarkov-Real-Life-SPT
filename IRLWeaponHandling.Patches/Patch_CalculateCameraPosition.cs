@@ -24,13 +24,13 @@ internal class Patch_CalculateCameraPosition : ModulePatch
         {
             return;
         }
-        _lastFrame = Time.frameCount;
 
         Player player = HandlingManager.LocalPlayer();
         if (player == null || player.ProceduralWeaponAnimation != __instance)
         {
             return;
         }
+        _lastFrame = Time.frameCount;
 
         // Skip weapon offset during free look — let vanilla handle it
         if (player.MouseLookControl)
@@ -38,17 +38,31 @@ internal class Patch_CalculateCameraPosition : ModulePatch
             return;
         }
 
+        // Firearms only — eating/drinking/interaction controllers keep
+        // ProceduralWeaponAnimation alive, and our camera/weapon writes
+        // fight their animations.
+        if (player.HandsController is not Player.FirearmController)
+        {
+            return;
+        }
+
         if (__instance.HandsContainer?.CameraTransform != null)
         {
             __instance.HandsContainer.CameraTransform.localRotation = Quaternion.Euler(HandlingState.HeadRotation);
+            if (ProceduralHipSystem.ControlsCamera)
+            {
+                HeadAttachSystem.Reset();
+            }
+            else
+            {
+                HeadAttachSystem.Apply(player, __instance.HandsContainer.CameraTransform);
+            }
         }
 
-        // Apply the procedural weapon offset (weapon rotation relative to camera).
-        // In hip fire: uses ProceduralHipSystem.WeaponOffset.
-        // In ADS: uses DeadzoneSystem.WeaponOffset so the weapon visibly moves
-        //         inside the ADS deadzone cone while the camera stays locked.
-        // Skip when in left stance (shoulder swap) so the weapon stays attached
-        // to the hands instead of floating off due to the deadzone offset.
+        // Apply the shared procedural weapon offset (weapon rotation relative
+        // to camera) so hip fire and ADS preserve the same firing direction
+        // through transitions. Skip when in left stance (shoulder swap) so the
+        // weapon stays attached to the hands instead of floating off.
         if (__instance.HandsContainer?.WeaponRoot != null)
         {
             bool isLeftStance = false;
@@ -60,14 +74,8 @@ internal class Patch_CalculateCameraPosition : ModulePatch
 
             if (!isLeftStance)
             {
-                if (HandlingState.IsAiming)
-                {
-                    __instance.HandsContainer.WeaponRoot.localRotation = DeadzoneSystem.WeaponOffset * __instance.HandsContainer.WeaponRoot.localRotation;
-                }
-                else
-                {
-                    __instance.HandsContainer.WeaponRoot.localRotation = ProceduralHipSystem.WeaponOffset * SwaySystem.ProceduralSwayOffset * __instance.HandsContainer.WeaponRoot.localRotation;
-                }
+                __instance.HandsContainer.WeaponRoot.localRotation = ProceduralHipSystem.WeaponOffset * __instance.HandsContainer.WeaponRoot.localRotation;
+                ProceduralHipSystem.ApplyWeaponPosOffset(__instance.HandsContainer.WeaponRoot);
             }
         }
     }

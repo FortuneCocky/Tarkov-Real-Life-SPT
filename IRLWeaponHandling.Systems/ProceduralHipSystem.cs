@@ -22,6 +22,13 @@ internal static class ProceduralHipSystem
     private static Quaternion _weaponRot = Quaternion.identity;
     private static Quaternion _cameraRot = Quaternion.identity;
     private static bool _initialized;
+    private static float _cameraSuppressUntil;
+    private static bool _lastAiming;
+    private static float _zoneTransitionStart;
+    private static float _zoneTransitionEnd;
+    private static bool _handsTransitionActive;
+    private static bool _recoilReturnActive;
+    private static Quaternion _recoilAnchor = Quaternion.identity;
 
     // Sprint blend: 0 = full hip deadzone, 1 = full sprint (no deadzone).
     private static float _sprintBlend;
@@ -57,31 +64,132 @@ internal static class ProceduralHipSystem
     private static float _wristRollCurrent;
     private static float _wristRollVel;
 
-    // --- Shoulder-pivot tracking state ---
-    // The gun is grounded at the shoulder (stock doesn't move). When the
-    // player moves the mouse, the arms track with a slight lag — like a
-    // tracking system where the arms try to follow. Because the gun pivots
-    // from the shoulder, the TIP curves in the turn direction, tracing an arc.
-    //
-    // This is a rotational offset (not position). The pivot point is the
-    // WeaponRoot origin (near the shoulder), so rotating it makes the muzzle
-    // tip swing while the stock stays put.
-    private static float _trackYaw;      // current tracking yaw offset (deg)
-    private static float _trackYawVel;   // tracking yaw spring velocity
-    private static float _trackPitch;    // current tracking pitch offset (deg)
-    private static float _trackPitchVel; // tracking pitch spring velocity
-    // Smoothed mouse rate for the tracking input
-    private static float _smoothYawRate;
-    private static float _smoothPitchRate;
+    // --- Body turn lead state ---
+    // Wrist-turn effect: yaw swings the muzzle ahead of the turn, roll banks
+    // the gun like a wrist twist. Springs settle it back to neutral.
+    private static float _leadYaw;
+    private static float _leadYawVel;
+    private static float _leadRoll;
+    private static float _leadRollVel;
+
+    // ADS entry lift — decays from 1 to 0, giving the gun a brief rise that
+    // settles back into the normal ADS pose.
+    private static float _adsLift;
+    private static float _adsFloatTime;
+    private static Vector2 _adsFloat;
+
+    // --- Lazy weapon physics (spring-mass-damper follow) ---
+    // Angular velocity of the weapon tracker (deg/s) when lazy physics drives
+    // the camera-follow instead of exponential Slerp.
+    private static float _lazyYawVel;
+    private static float _lazyPitchVel;
+
+
 
     // Cached weapon offset — computed once per Tick, read many times per frame
     private static Quaternion _cachedWeaponOffset = Quaternion.identity;
+    private static Vector3 _cachedWeaponPosOffset = Vector3.zero;
 
     /// <summary>Where the camera should look (locked until weapon hits edge).</summary>
     public static Vector3 CameraEuler => _cameraRot.eulerAngles;
 
+    /// <summary>True once the hip system has a valid weapon/camera pose.</summary>
+    public static bool HasPose => _initialized;
+
+    public static Vector2 DebugOffset { get; private set; }
+
+    public static float DebugAngle { get; private set; }
+
+    public static Vector2 ControlOffset { get; private set; }
+
+    public static float ControlAngle { get; private set; }
+
+    public static Vector2 DebugScreenPoint { get; private set; }
+
+    public static bool HasDebugScreenPoint { get; private set; }
+
+    public static bool ControlsCamera => false;
+
+    public static bool IsZoneTransitionActive => _handsTransitionActive ||
+        Time.unscaledTime < _zoneTransitionEnd || Time.unscaledTime < _cameraSuppressUntil;
+
+    public static float EffectiveZoneDegrees(float configuredZone)
+    {
+        if (_handsTransitionActive)
+            return Mathf.Max(45f, configuredZone);
+        if (Time.unscaledTime >= _zoneTransitionEnd)
+            return configuredZone;
+
+        float duration = Mathf.Max(0.01f, _zoneTransitionEnd - _zoneTransitionStart);
+        float progress = Mathf.Clamp01((Time.unscaledTime - _zoneTransitionStart) / duration);
+        float eased = progress * progress * (3f - 2f * progress);
+        return Mathf.Lerp(Mathf.Max(45f, configuredZone), configuredZone, eased);
+    }
+
+    public static float GreenZoneDegrees(float whiteZone) => Mathf.Max(0.5f, whiteZone * 0.55f);
+
+    private static void UpdateControlOffset()
+    {
+        if (!_initialized)
+        {
+            ControlOffset = Vector2.zero;
+            ControlAngle = 0f;
+            return;
+        }
+
+        Vector3 relative = (_weaponRot * Quaternion.Inverse(_cameraRot)).eulerAngles;
+        ControlOffset = new Vector2(
+            Mathf.DeltaAngle(0f, relative.y),
+            Mathf.DeltaAngle(0f, relative.x));
+        ControlAngle = Quaternion.Angle(_cameraRot, _weaponRot);
+    }
+
+    public static void AddImpulse(float yaw, float pitch)
+    {
+        if (!_initialized)
+            return;
+
+        if (!_recoilReturnActive)
+        {
+            _recoilAnchor = _weaponRot;
+            _recoilReturnActive = true;
+        }
+        _weaponRot = Quaternion.Euler(pitch, yaw, 0f) * _weaponRot;
+    }
+
+    /// <summary>Current hip weapon rotation (used to seed the ADS deadzone).</summary>
+    public static Quaternion WeaponRotation => _weaponRot;
+
+    /// <summary>Current hip camera rotation (used to seed the ADS deadzone).</summary>
+    public static Quaternion CameraRotation => _cameraRot;
+
     /// <summary>Relative weapon offset applied to WeaponRoot (weapon vs camera).</summary>
     public static Quaternion WeaponOffset => _cachedWeaponOffset;
+
+    /// <summary>Relative weapon positional offset applied to WeaponRoot —
+    /// used for pivot compensation (wrist turns) and the ADS entry lift.</summary>
+    public static Vector3 WeaponPosOffset => _cachedWeaponPosOffset;
+
+    // Tracks the positional offset we actually wrote into WeaponRoot so the
+    // next frame can remove it if the game didn't reset the transform —
+    // prevents accumulation on weapons (e.g. pistols) whose position isn't
+    // rewritten every frame.
+    private static Vector3 _appliedPosOffset = Vector3.zero;
+    private static Vector3 _lastPosResult = Vector3.zero;
+
+    /// <summary>
+    /// Applies the positional offset to WeaponRoot safely. If the game did
+    /// not reset the transform since our last write, the previous offset is
+    /// removed first — so the offset can never accumulate frame to frame.
+    /// </summary>
+    public static void ApplyWeaponPosOffset(Transform weaponRoot)
+    {
+        if (_appliedPosOffset != Vector3.zero && weaponRoot.localPosition == _lastPosResult)
+            weaponRoot.localPosition -= _appliedPosOffset;
+        weaponRoot.localPosition += _cachedWeaponPosOffset;
+        _appliedPosOffset = _cachedWeaponPosOffset;
+        _lastPosResult = weaponRoot.localPosition;
+    }
 
     public static void Tick(Player player, float deltaTime)
     {
@@ -90,7 +198,9 @@ internal static class ProceduralHipSystem
             return;
         }
 
-        if (!HandlingConfig.HipDeadzoneEnabled.Value || !HandlingState.HasWeapon)
+        bool isAiming = HandlingState.IsAiming;
+        bool modeEnabled = isAiming ? HandlingConfig.DeadzoneEnabled.Value : HandlingConfig.HipDeadzoneEnabled.Value;
+        if (!modeEnabled || !HandlingState.HasWeapon)
         {
             Reset();
             return;
@@ -103,10 +213,22 @@ internal static class ProceduralHipSystem
             return;
         }
 
+        if (isAiming != _lastAiming)
+        {
+            BeginZoneTransition(0.65f);
+            _lastAiming = isAiming;
+            if (isAiming)
+                _adsLift = 1f;
+        }
+
         // Smoothly blend sprint state instead of hard reset.
         float sprintTarget = HandlingState.IsSprinting ? 1f : 0f;
         float dt = Mathf.Min(deltaTime, 0.05f);
-        SpringSprint(ref _sprintBlend, ref _sprintVelocity, sprintTarget, HandlingConfig.SprintTransitionSpeed.Value, dt);
+        // Tracking Slerps use the real frame time (capped for sanity) —
+        // Slerp can't overshoot, and using the clamped spring dt makes the
+        // tracker fall behind below 20fps until the catch-up snap ratchets.
+        float trackDt = Mathf.Min(deltaTime, 0.2f);
+        SpringSprint(ref _sprintBlend, ref _sprintVelocity, sprintTarget, 10f, dt);
 
         Quaternion target = Quaternion.Euler(player.HeadRotation);
         if (!_initialized)
@@ -116,62 +238,125 @@ internal static class ProceduralHipSystem
             _initialized = true;
         }
 
-        // --- Weapon: tracks the mouse target with weighted smoothing ---
-        float weaponSmooth = Mathf.Max(0.1f, HandlingConfig.HipWeaponSmooth.Value);
-        float sprintMul = 1f + _sprintBlend * 2f;
-        _weaponRot = Quaternion.Slerp(_weaponRot, target, weaponSmooth * sprintMul * dt);
+        _cameraRot = target;
 
-        // Procedural deadzone drift — reduced during sprint.
-        float deadzoneInfluence = HandlingConfig.HipDeadzoneInfluence.Value * (1f - _sprintBlend * 0.7f);
+        WeaponStats stats = HandlingState.Stats;
+        float fatigue = 1f - HandlingState.HandsStamina01;
+        float movement = HandlingState.MovementSpeed01;
+        float adsTightness = isAiming ? HandlingConfig.AdsFollowTightness.Value : 0f;
+        float weaponFollowSpeed;
+        float weaponFollowT;
+        if (isAiming && adsTightness >= 0.999f)
+        {
+            weaponFollowSpeed = 1000f;
+            weaponFollowT = 1f;
+        }
+        else
+        {
+            float responsiveness = isAiming ? Mathf.Pow(adsTightness, 1.5f) : HandlingConfig.HipDeadzoneSmoothing.Value;
+            weaponFollowSpeed = isAiming ? Mathf.Lerp(2.5f, 24f, responsiveness) : Mathf.Lerp(5f, 15f, responsiveness);
+            weaponFollowSpeed *= Mathf.Lerp(1.2f, 0.52f, stats.WeightProgress);
+            weaponFollowSpeed *= Mathf.Lerp(0.72f, 1.2f, stats.Ergonomics01);
+            if (isAiming)
+                weaponFollowSpeed *= Mathf.Lerp(1f, 0.58f, fatigue) * Mathf.Lerp(1f, 0.7f, movement);
+            weaponFollowSpeed *= LocomotionGaitSystem.WeaponFollowMultiplier * InjuryHandlingSystem.WeaponFollowMultiplier * TurnInPlaceSystem.WeaponFollowMultiplier;
+            weaponFollowSpeed = Mathf.Lerp(weaponFollowSpeed, 24f, _sprintBlend);
+            weaponFollowT = 1f - Mathf.Exp(-weaponFollowSpeed * trackDt);
+        }
+
+        // Lazy physics is hip-only — ADS keeps the classic direct tracking.
+        bool lazyPhysics = HandlingConfig.LazyPhysicsEnabled?.Value == true
+            && !isAiming;
+
+        if (_recoilReturnActive)
+        {
+            _recoilAnchor = Quaternion.Slerp(_recoilAnchor, target, weaponFollowT);
+            float velDecay = Mathf.Exp(-8f * trackDt);
+            _lazyYawVel *= velDecay;
+            _lazyPitchVel *= velDecay;
+        }
+        else if (lazyPhysics)
+        {
+            IntegrateLazyRotation(target, weaponFollowSpeed, deltaTime);
+        }
+        else
+        {
+            float velDecay = Mathf.Exp(-10f * trackDt);
+            _lazyYawVel *= velDecay;
+            _lazyPitchVel *= velDecay;
+            _weaponRot = Quaternion.Slerp(_weaponRot, target, weaponFollowT);
+        }
+
+        float deadzoneInfluence = (isAiming
+            ? (1f - adsTightness) * Mathf.Lerp(0.25f, 1.25f, stats.WeightProgress) *
+                Mathf.Lerp(1f, 1.8f, fatigue) * Mathf.Lerp(1f, 1.45f, movement)
+            : HandlingConfig.HipDeadzoneInfluence.Value * 3f) * (1f - _sprintBlend * 0.7f);
         if (deadzoneInfluence > 0f)
         {
-            float yawDrift = MotionTracker.YawRate * deadzoneInfluence * 0.01f;
-            float pitchDrift = MotionTracker.PitchRate * deadzoneInfluence * 0.01f;
-            Quaternion drift = Quaternion.Euler(pitchDrift, yawDrift, 0f);
-            _weaponRot = drift * _weaponRot;
+            float proceduralDt = Mathf.Min(deltaTime, 1f / 30f);
+            float frameScale = proceduralDt * 60f;
+            float maxDrift = isAiming ? 0.6f : 1.2f;
+            float yawDrift = Mathf.Clamp(MotionTracker.YawRate * deadzoneInfluence * 0.01f * frameScale, -maxDrift, maxDrift);
+            float pitchDrift = Mathf.Clamp(MotionTracker.PitchRate * deadzoneInfluence * 0.01f * frameScale, -maxDrift, maxDrift);
+            _weaponRot = Quaternion.Euler(pitchDrift, yawDrift, 0f) * _weaponRot;
         }
 
-        // --- Hard clamp: prevent the weapon from drifting too far from the
-        // mouse target during fast turns. When the angle exceeds the catch-up
-        // limit, snap the weapon toward the target instead of Slerping slowly.
-        // This fixes arms failing to catch up during hard turns.
-        float catchUpAngle = 30f + _sprintBlend * 20f; // 30° hip, up to 50° sprint
-        float weaponDrift = Quaternion.Angle(_weaponRot, target);
-        if (weaponDrift > catchUpAngle)
+        float maxWeaponLag = Mathf.Max(0.1f, EffectiveZoneDegrees(isAiming
+            ? HandlingConfig.DeadzoneAds.Value
+            : HandlingConfig.HipCameraFollowZone.Value));
+        float weaponLag = Quaternion.Angle(_weaponRot, target);
+        if (weaponLag > maxWeaponLag)
         {
-            float snapT = (weaponDrift - catchUpAngle) / Mathf.Max(weaponDrift, 0.001f);
-            _weaponRot = Quaternion.Slerp(_weaponRot, target, snapT);
+            float excessT = (weaponLag - maxWeaponLag) / weaponLag;
+            float restraintT = 1f - Mathf.Exp(-18f * Mathf.Min(deltaTime, 1f / 30f));
+            _weaponRot = Quaternion.Slerp(_weaponRot, target, excessT * restraintT);
         }
 
-        // --- Camera: locked inside the cone, follows only at edge ---
-        float cone = Mathf.Max(0.1f, HandlingConfig.HipDeadzoneCone.Value);
-        float angle = Quaternion.Angle(_cameraRot, _weaponRot);
-
-        if (angle > cone)
+        if (_recoilReturnActive)
         {
-            // Weapon hit the edge — camera centers itself with the mouse target.
-            float smoothness = Mathf.Max(0.1f, HandlingConfig.HipCameraLag.Value);
-            smoothness *= (1f + _sprintBlend * 2f);
-            _cameraRot = Quaternion.Slerp(_cameraRot, target, smoothness * dt);
-
-            // Safety: if the weapon is moving fast and the camera can't keep up,
-            // snap the camera so the arms never disappear off screen.
-            float maxAngle = cone * 1.5f;
-            float postAngle = Quaternion.Angle(_cameraRot, _weaponRot);
-            if (postAngle > maxAngle)
+            float returnSpeed = ShotSystem.InShotRecovery ? 3.5f : 11f;
+            _weaponRot = Quaternion.Slerp(
+                _weaponRot,
+                _recoilAnchor,
+                1f - Mathf.Exp(-returnSpeed * trackDt));
+            if (!ShotSystem.InShotRecovery && Quaternion.Angle(_weaponRot, _recoilAnchor) < 0.05f)
             {
-                float snapT = (postAngle - maxAngle) / Mathf.Max(postAngle, 0.001f);
-                _cameraRot = Quaternion.Slerp(_cameraRot, _weaponRot, snapT);
+                _weaponRot = _recoilAnchor;
+                _recoilReturnActive = false;
             }
         }
+
+        UpdateControlOffset();
+
+        // ADS entry lift decay — exponential so it eases out, not linear.
+        _adsLift *= Mathf.Exp(-5.5f * trackDt);
+        if (_adsLift < 0.001f)
+            _adsLift = 0f;
 
         // --- Natural motion layers (blended out during sprint) ---
         UpdateNaturalMotion(dt, sprintTarget);
         UpdateProceduralArmMotion(player, dt);
-        UpdateShoulderPivotTracking(dt);
+        UpdateBodyTurnLead(dt);
+
+        float automaticAdsFloat = isAiming && !HandlingState.IsHoldingBreath
+            ? (1f - adsTightness) * (0.06f + stats.WeightProgress * 0.14f + fatigue * 0.38f + movement * 0.28f)
+            : 0f;
+        if (automaticAdsFloat > 0.001f)
+        {
+            _adsFloatTime += dt * Mathf.Lerp(0.65f, 1.15f, fatigue + movement * 0.5f);
+            Vector2 floatTarget = new(
+                (Mathf.PerlinNoise(_adsFloatTime, 17.3f) - 0.5f) * 2f * automaticAdsFloat,
+                (Mathf.PerlinNoise(31.7f, _adsFloatTime) - 0.5f) * 2f * automaticAdsFloat * 0.7f);
+            _adsFloat = Vector2.Lerp(_adsFloat, floatTarget, 1f - Mathf.Exp(-4f * dt));
+        }
+        else
+        {
+            _adsFloat = Vector2.Lerp(_adsFloat, Vector2.zero, 1f - Mathf.Exp(-8f * dt));
+        }
 
         // --- Cache the weapon offset quaternion (computed once per tick) ---
         CacheWeaponOffset();
+        UpdateFireDirection(player);
     }
 
     /// <summary>
@@ -184,13 +369,44 @@ internal static class ProceduralHipSystem
         if (!_initialized)
         {
             _cachedWeaponOffset = Quaternion.identity;
+            _cachedWeaponPosOffset = Vector3.zero;
+            DebugOffset = Vector2.zero;
+            DebugAngle = 0f;
+            ControlOffset = Vector2.zero;
+            ControlAngle = 0f;
             return;
         }
 
         Quaternion baseOffset = _weaponRot * Quaternion.Inverse(_cameraRot);
 
+        // Strip accumulated roll: chained yaw/pitch quaternion deltas
+        // always leak a little roll into _weaponRot, and nothing ever
+        // removed it — so after a fast whip the gun stayed tilted until a
+        // full Reset. We rewrite _weaponRot to the roll-free equivalent so
+        // the error can't keep compounding inside the tracker either.
+        // Deliberate roll layers (tilt/lead/strafe) are added below as
+        // clean euler terms and are unaffected.
+        Vector3 baseEuler = baseOffset.eulerAngles;
+        baseOffset = Quaternion.Euler(
+            Mathf.DeltaAngle(0f, baseEuler.x),
+            Mathf.DeltaAngle(0f, baseEuler.y),
+            0f);
+        _weaponRot = baseOffset * _cameraRot;
+        UpdateControlOffset();
+        if (_recoilReturnActive)
+        {
+            Vector3 anchorEuler = (_recoilAnchor * Quaternion.Inverse(_cameraRot)).eulerAngles;
+            _recoilAnchor = Quaternion.Euler(
+                Mathf.DeltaAngle(0f, anchorEuler.x),
+                Mathf.DeltaAngle(0f, anchorEuler.y),
+                0f) * _cameraRot;
+        }
+
+        Vector3 posOffset = Vector3.zero;
+
+        bool applyHipMotion = !HandlingState.IsAiming;
         float naturalStrength = HandlingConfig.HipNaturalMotion.Value;
-        if (naturalStrength > 0.001f)
+        if (applyHipMotion && naturalStrength > 0.001f)
         {
             Vector2 drift = _organicOffset * naturalStrength;
             Vector2 whip = _whipOffset * naturalStrength;
@@ -212,84 +428,171 @@ internal static class ProceduralHipSystem
         armEuler.z += _strafeRoll;
         // Idle wrist roll: subtle random roll
         armEuler.z += _wristRollCurrent;
-        if (armEuler != Vector3.zero)
+        if (applyHipMotion && armEuler != Vector3.zero)
             baseOffset = Quaternion.Euler(armEuler) * baseOffset;
 
-        // Shoulder-pivot tracking: the gun tip curves when turning (non-ADS).
-        // Applied as a rotation from the WeaponRoot (shoulder pivot point),
-        // so the muzzle traces an arc while the stock stays grounded.
-        if (HandlingConfig.HipFloatMotion.Value > 0.001f)
+        if (HandlingState.IsAiming && _adsFloat != Vector2.zero)
+            baseOffset = Quaternion.Euler(_adsFloat.y, _adsFloat.x, 0f) * baseOffset;
+
+        if (applyHipMotion && HandlingConfig.HipBodyTurnLead.Value > 0.001f)
         {
-            Vector3 trackEuler = new Vector3(_trackPitch, _trackYaw, 0f);
-            if (trackEuler != Vector3.zero)
-                baseOffset = Quaternion.Euler(trackEuler) * baseOffset;
+            Quaternion leadRot = Quaternion.Euler(0f, _leadYaw, _leadRoll);
+            // Pivot the turn at the hands: the rotation is applied about a
+            // point at the grip (below/ahead of the camera) instead of the
+            // weapon root, so the grip stays planted while the muzzle
+            // sweeps — reads as the wrist bending, not the gun sliding.
+            Vector3 pivot = new Vector3(0f, -0.12f, 0.08f);
+            posOffset += pivot - leadRot * pivot;
+            baseOffset = leadRot * baseOffset;
+        }
+
+        if (InjuryHandlingSystem.ArmPenalty > 0.001f)
+        {
+            Vector3 injuryRotation = new(
+                InjuryHandlingSystem.ArmPenalty * 0.45f,
+                InjuryHandlingSystem.ArmBias * 0.8f,
+                InjuryHandlingSystem.ArmBias * 2.5f);
+            baseOffset = Quaternion.Euler(injuryRotation) * baseOffset;
+        }
+
+        posOffset += TurnInPlaceSystem.WeaponPosOffset;
+        baseOffset = TurnInPlaceSystem.WeaponRotationOffset * baseOffset;
+
+        // ADS entry lift — the gun rises briefly then settles back into the
+        // normal ADS pose. Sin-curve-shaped decay keeps it soft at both ends.
+        if (HandlingState.IsAiming && _adsLift > 0f)
+        {
+            float lift = _adsLift * _adsLift; // ease-out shape
+            posOffset.y += 0.022f * lift;
+            baseOffset = Quaternion.Euler(-4f * lift, 0f, 0f) * baseOffset;
         }
 
         float blend = 1f - _sprintBlend;
         _cachedWeaponOffset = Quaternion.Slerp(Quaternion.identity, baseOffset, blend);
+        _cachedWeaponPosOffset = posOffset * blend;
     }
 
     /// <summary>
-    /// Shoulder-pivot tracking system.
-    ///
-    /// The gun is grounded at the shoulder — the stock stays fixed. When the
-    /// player moves the mouse, the arms act like a tracking system: they try
-    /// to follow but lag slightly behind. Because the gun pivots from the
-    /// shoulder (WeaponRoot origin), the TIP curves in the turn direction,
-    /// tracing an arc. When the mouse stops, the arms spring back to neutral.
-    ///
-    /// This is purely rotational — no position offset. The pivot point is the
-    /// WeaponRoot, which sits near the shoulder, so rotating it makes the
-    /// muzzle swing while the stock stays planted.
+    /// Lazy physics rotation integrator: treats the weapon as a sprung mass
+    /// chasing the camera. Under-damped below ζ=1 so fast camera motion
+    /// overshoots and settles instead of easing monotonically. Stiffness
+    /// reuses the existing follow-speed chain so weight, ergonomics, gait,
+    /// injury and fatigue scaling all still apply.
     /// </summary>
-    private static void UpdateShoulderPivotTracking(float dt)
+    private static void IntegrateLazyRotation(Quaternion target, float speed, float deltaTime)
     {
-        float trackStrength = HandlingConfig.HipFloatMotion.Value;
-        if (trackStrength <= 0.001f)
+        float sdt = Mathf.Min(deltaTime, 1f / 90f);
+        float omega = Mathf.Clamp(speed * HandlingConfig.LazyTension.Value, 1.5f, 30f);
+        float zeta = Mathf.Clamp(1f - HandlingConfig.LazySpringiness.Value * 0.35f, 0.25f, 1.2f);
+
+        Vector3 rel = (target * Quaternion.Inverse(_weaponRot)).eulerAngles;
+        float errYaw = Mathf.DeltaAngle(0f, rel.y);
+        float errPitch = Mathf.DeltaAngle(0f, rel.x);
+
+        // Deadband — an under-damped spring never truly rests, so at idle the
+        // gun micro-twitches forever. Below the perceptible threshold, kill
+        // the residual velocity and track directly.
+        if (Mathf.Abs(errYaw) < 0.015f && Mathf.Abs(errPitch) < 0.015f &&
+            Mathf.Abs(_lazyYawVel) < 1f && Mathf.Abs(_lazyPitchVel) < 1f)
         {
-            _trackYaw = 0f; _trackYawVel = 0f;
-            _trackPitch = 0f; _trackPitchVel = 0f;
-            _smoothYawRate = 0f;
-            _smoothPitchRate = 0f;
+            _lazyYawVel = 0f;
+            _lazyPitchVel = 0f;
+            _weaponRot = Quaternion.Slerp(_weaponRot, target, 1f - Mathf.Exp(-speed * sdt));
             return;
         }
 
-        float sprintFade = 1f - _sprintBlend * 0.85f;
+        float k = omega * omega;
+        float c = 2f * zeta * omega;
+        _lazyYawVel += (errYaw * k - _lazyYawVel * c) * sdt;
+        _lazyPitchVel += (errPitch * k - _lazyPitchVel * c) * sdt;
+        _lazyYawVel = Mathf.Clamp(_lazyYawVel, -900f, 900f);
+        _lazyPitchVel = Mathf.Clamp(_lazyPitchVel, -900f, 900f);
+        _weaponRot = Quaternion.Euler(_lazyPitchVel * sdt, _lazyYawVel * sdt, 0f) * _weaponRot;
+    }
+
+    private static void UpdateFireDirection(Player player)
+    {
+        HasDebugScreenPoint = false;
+        if (player?.HandsController is not Player.FirearmController firearmController || Camera.main == null)
+        {
+            DebugOffset = Vector2.zero;
+            DebugAngle = 0f;
+            return;
+        }
+
+        try
+        {
+            Vector3 position = firearmController.CurrentFireport.position;
+            Vector3 direction = firearmController.WeaponDirection;
+            firearmController.AdjustShotVectors(ref position, ref direction);
+            direction.Normalize();
+
+            Camera camera = Camera.main;
+            Vector3 localDirection = camera.transform.InverseTransformDirection(direction);
+            if (localDirection.z <= 0f)
+            {
+                DebugOffset = Vector2.zero;
+                DebugAngle = 0f;
+                return;
+            }
+
+            DebugOffset = new Vector2(
+                Mathf.Atan2(localDirection.x, localDirection.z) * Mathf.Rad2Deg,
+                -Mathf.Atan2(localDirection.y, new Vector2(localDirection.x, localDirection.z).magnitude) * Mathf.Rad2Deg);
+            DebugAngle = Vector3.Angle(Vector3.forward, localDirection);
+
+            Vector3 screen = camera.WorldToScreenPoint(position + direction * 100f);
+            SSAA ssaa = camera.GetComponent<SSAA>();
+            float renderScale = ssaa != null && ssaa.GetInputHeight() > 0
+                ? (float)ssaa.GetOutputHeight() / ssaa.GetInputHeight()
+                : 1f;
+            DebugScreenPoint = new Vector2(screen.x * renderScale, Screen.height - screen.y * renderScale);
+            HasDebugScreenPoint = screen.z > 0f;
+        }
+        catch
+        {
+            DebugOffset = Vector2.zero;
+            DebugAngle = 0f;
+        }
+    }
+
+    /// <summary>
+    /// Body turn lead — the wrist-turn effect. When the mouse moves, the
+    /// muzzle swings out ahead of the turn direction and the gun banks like
+    /// the wrist is twisting; when input stops, it springs back to neutral
+    /// with a slight overshoot. Heavier weapons swing slower and wider.
+    /// </summary>
+    private static void UpdateBodyTurnLead(float dt)
+    {
+        float strength = HandlingConfig.HipBodyTurnLead.Value;
+        if (strength <= 0.001f)
+        {
+            _leadYaw = 0f;
+            _leadYawVel = 0f;
+            _leadRoll = 0f;
+            _leadRollVel = 0f;
+            return;
+        }
+
         WeaponStats stats = HandlingState.Stats;
-        // Heavier weapons track slower (more arm inertia)
-        float weightTrack = 1f - 0.3f * stats.WeightProgress;
-        // Tie to deadzone influence
-        float influence = HandlingConfig.HipDeadzoneInfluence.Value;
-        float influenceScale = Mathf.Lerp(0.3f, 1f, Mathf.Clamp01(influence / 3f));
-        float effective = trackStrength * sprintFade * influenceScale;
+        float sprintFade = 1f - _sprintBlend * 0.85f;
+        float weightFade = 1f - stats.WeightProgress * 0.25f;
+        float strengthT = Mathf.Clamp01(strength / 3f);
 
-        // Smooth the mouse rate — this is the "tracking target" that the arms follow
-        // The smoothing creates the lag: arms don't react instantly, they track
-        float smoothSpeed = Mathf.Lerp(12f, 6f, stats.WeightProgress); // heavier = slower tracking
-        _smoothYawRate = Mathf.Lerp(_smoothYawRate, MotionTracker.YawRate, dt * smoothSpeed);
-        _smoothPitchRate = Mathf.Lerp(_smoothPitchRate, MotionTracker.PitchRate, dt * smoothSpeed);
+        // Large swing — this must read as the wrist physically rotating the
+        // gun, not a small offset. 10° subtle to 30° dramatic.
+        float normalizedTurn = Mathf.Clamp(MotionTracker.YawRate / 280f, -1f, 1f);
+        float yawTarget = normalizedTurn * Mathf.Lerp(10f, 30f, strengthT) * sprintFade * weightFade;
 
-        // The tracking target: the arms want to align with where the mouse is going,
-        // but they lag. The offset is proportional to the difference between the
-        // raw mouse rate and the smoothed rate — this is the "tracking error"
-        float yawError = MotionTracker.YawRate - _smoothYawRate;
-        float pitchError = MotionTracker.PitchRate - _smoothPitchRate;
+        // Banking into the turn is what reads as "the wrist turned" —
+        // without roll it just looks like the gun slid sideways.
+        float rollTarget = -yawTarget * Mathf.Lerp(0.45f, 0.75f, strengthT);
 
-        // Target rotation: the gun tip curves in the direction of mouse motion
-        // Positive yaw rate (turning right) → muzzle curves right (positive yaw offset)
-        // The scaling makes the curve subtle but noticeable
-        float yawTarget = Mathf.Clamp(yawError * 0.02f * effective * weightTrack, -3f, 3f);
-        float pitchTarget = Mathf.Clamp(pitchError * 0.015f * effective * weightTrack, -2f, 2f);
-
-        // Spring the tracking rotation — arms try to catch up to the mouse
-        // Heavier weapons use a slower spring (arms have more inertia)
-        float trackSpringFreq = Mathf.Lerp(7f, 3.5f, stats.WeightProgress);
-        SpringFloat(ref _trackYaw, ref _trackYawVel, yawTarget, trackSpringFreq, dt);
-        SpringFloat(ref _trackPitch, ref _trackPitchVel, pitchTarget, trackSpringFreq * 0.8f, dt);
-
-        // When the mouse stops, the smoothed rate catches up to zero, the error
-        // goes to zero, and the spring pulls the tracking offset back to neutral.
-        // The gun returns to its grounded shoulder position.
+        // Slightly underdamped spring: fast attack, settles back with a
+        // small overshoot. Heavier weapons get a lazier swing.
+        float freq = Mathf.Lerp(6f, 3.5f, stats.WeightProgress);
+        SpringFloat(ref _leadYaw, ref _leadYawVel, yawTarget, freq, dt);
+        SpringFloat(ref _leadRoll, ref _leadRollVel, rollTarget, freq, dt);
     }
 
     /// <summary>
@@ -474,31 +777,62 @@ internal static class ProceduralHipSystem
         }
     }
 
-    /// <summary>Returns the camera rotation to use for the head, or the input if inactive.</summary>
+    /// <summary>Returns the player-driven camera rotation unchanged.</summary>
     public static Vector3 Modify(Vector3 headRotation)
     {
-        if (!_initialized || !HandlingConfig.HipDeadzoneEnabled.Value)
-        {
+        if (!_initialized)
             return headRotation;
-        }
-        // During full sprint, don't override the camera — let vanilla handle it.
-        if (_sprintBlend > 0.95f)
+
+        Quaternion rawCamera = Quaternion.Euler(headRotation);
+        _cameraRot = rawCamera;
+        if (Time.unscaledTime < _cameraSuppressUntil)
         {
-            return headRotation;
+            _weaponRot = rawCamera;
+            _recoilAnchor = rawCamera;
+            _recoilReturnActive = false;
+            _lazyYawVel = 0f;
+            _lazyPitchVel = 0f;
+            _cachedWeaponOffset = Quaternion.identity;
+            _cachedWeaponPosOffset = Vector3.zero;
+            ControlOffset = Vector2.zero;
+            ControlAngle = 0f;
         }
-        // Blend between our camera and vanilla as sprint increases.
-        // Only blend yaw and pitch, never roll — prevents camera roll bug.
-        Vector3 ourCam = _cameraRot.eulerAngles;
-        Vector3 result = headRotation;
-        result.x = Mathf.LerpAngle(ourCam.x, headRotation.x, _sprintBlend);
-        result.y = Mathf.LerpAngle(ourCam.y, headRotation.y, _sprintBlend);
-        return result;
+        return headRotation;
+    }
+
+    public static void SetHandsTransition(bool active)
+    {
+        if (active)
+        {
+            _handsTransitionActive = true;
+            _cameraSuppressUntil = Time.unscaledTime + 0.1f;
+        }
+        else if (_handsTransitionActive)
+        {
+            _handsTransitionActive = false;
+            BeginZoneTransition(0.45f);
+        }
+    }
+
+    public static void BeginZoneTransition(float seconds)
+    {
+        _zoneTransitionStart = Time.unscaledTime;
+        _zoneTransitionEnd = _zoneTransitionStart + Mathf.Max(0f, seconds);
+    }
+
+    public static void SuppressCameraFollow(float seconds)
+    {
+        _cameraSuppressUntil = Time.unscaledTime + Mathf.Max(0f, seconds);
+        BeginZoneTransition(seconds);
     }
 
     public static void Reset()
     {
         _weaponRot = Quaternion.identity;
         _cameraRot = Quaternion.identity;
+        _recoilAnchor = Quaternion.identity;
+        _recoilReturnActive = false;
+        _lastAiming = false;
         _initialized = false;
         _sprintBlend = 0f;
         _sprintVelocity = 0f;
@@ -517,11 +851,25 @@ internal static class ProceduralHipSystem
         _wristRollTime = 0f;
         _wristRollCurrent = 0f;
         _wristRollVel = 0f;
-        _trackYaw = 0f; _trackYawVel = 0f;
-        _trackPitch = 0f; _trackPitchVel = 0f;
-        _smoothYawRate = 0f;
-        _smoothPitchRate = 0f;
+        _leadYaw = 0f;
+        _leadYawVel = 0f;
+        _leadRoll = 0f;
+        _leadRollVel = 0f;
+        _adsLift = 0f;
+        _adsFloatTime = 0f;
+        _adsFloat = Vector2.zero;
+        _lazyYawVel = 0f;
+        _lazyPitchVel = 0f;
         _cachedWeaponOffset = Quaternion.identity;
+        _cachedWeaponPosOffset = Vector3.zero;
+        _appliedPosOffset = Vector3.zero;
+        _lastPosResult = Vector3.zero;
+        DebugOffset = Vector2.zero;
+        DebugAngle = 0f;
+        ControlOffset = Vector2.zero;
+        ControlAngle = 0f;
+        DebugScreenPoint = Vector2.zero;
+        HasDebugScreenPoint = false;
     }
 
     private static void SpringSprint(ref float current, ref float velocity, float target, float speed, float dt)

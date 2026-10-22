@@ -36,8 +36,7 @@ internal static class LeanSystem
 		float num = 0f;
 		if (HandlingConfig.LeanEnabled.Value && HandlingState.HasWeapon && player != null)
 		{
-			float num2 = Mathf.Max(1f, HandlingConfig.LeanTurnRate.Value);
-			float turn = Mathf.Clamp(MotionTracker.YawRateSlow / num2, -1.5f, 1.5f);
+			float turn = Mathf.Clamp(MotionTracker.YawRateSlow / 180f, -1.5f, 1.5f);
 
 			float yaw = player.Rotation.x * Mathf.Deg2Rad;
 			float sin = Mathf.Sin(yaw);

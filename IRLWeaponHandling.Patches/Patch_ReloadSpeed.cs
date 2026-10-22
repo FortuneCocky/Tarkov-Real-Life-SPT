@@ -1,80 +1,105 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using EFT;
+using EFT.HealthSystem;
 using HarmonyLib;
 using IRLWeaponHandling.Configuration;
-using IRLWeaponHandling.Core;
 using SPT.Reflection.Patching;
 using UnityEngine;
 
 namespace IRLWeaponHandling.Patches;
 
 /// <summary>
-/// Modifies reload speed based on weapon ergonomics (efficiency) and applies
-/// a penalty when reloading while sprinting.
+/// Arm-injury reload scaling. Reload speed is untouched at full arm health,
+/// starts slowing below 85% arm HP, and bottoms out at 30% speed when an arm
+/// is blacked. Applied to both normal and quick reloads.
 /// </summary>
-internal class Patch_ReloadSpeed : ModulePatch
+internal static class ReloadArmScale
 {
     private static FieldInfo _buffInfoField;
     private static FieldInfo _reloadSpeedField;
     private static FieldInfo _playerField;
+    private static bool _resolved;
 
-    protected override MethodBase GetTargetMethod()
+    // Cache each WeaponBuffsInfo's untouched ReloadSpeed so scaling never
+    // compounds across reloads.
+    private class Box { public float Value; }
+    private static readonly ConditionalWeakTable<object, Box> _baseSpeeds = new();
+
+    private static bool TryResolve()
     {
+        if (_resolved) return _reloadSpeedField != null;
+        _resolved = true;
         _buffInfoField = AccessTools.Field(typeof(Player.FirearmController), "_buffInfo");
         _playerField = AccessTools.Field(typeof(Player.FirearmController), "_player");
-
-        // WeaponBuffsInfo is a nested type in SkillManager
         if (_buffInfoField != null)
-        {
-            var buffType = _buffInfoField.FieldType;
-            _reloadSpeedField = AccessTools.Field(buffType, "ReloadSpeed");
-        }
-
-        return typeof(Player.FirearmController).GetMethod("SetAnimatorAndProceduralValues", BindingFlags.Instance | BindingFlags.Public);
+            _reloadSpeedField = AccessTools.Field(_buffInfoField.FieldType, "ReloadSpeed");
+        return _reloadSpeedField != null;
     }
+
+    public static void Apply(Player.FirearmController fc)
+    {
+        if (!HandlingConfig.Enabled.Value || !TryResolve())
+            return;
+
+        object buffInfo = _buffInfoField.GetValue(fc);
+        Player player = _playerField?.GetValue(fc) as Player;
+        if (buffInfo == null || player == null || !player.IsYourPlayer)
+            return;
+
+        float baseSpeed;
+        if (!_baseSpeeds.TryGetValue(buffInfo, out Box box))
+        {
+            box = new Box { Value = (float)_reloadSpeedField.GetValue(buffInfo) };
+            _baseSpeeds.Add(buffInfo, box);
+        }
+        baseSpeed = box.Value;
+
+        float armHealth = ArmHealth01(player);
+        // Above 85% arm HP: full speed. Below: linear to 30% at 0 (blacked).
+        float scale = armHealth >= 0.85f ? 1f
+            : Mathf.Lerp(0.3f, 1f, armHealth / 0.85f);
+
+        _reloadSpeedField.SetValue(buffInfo, baseSpeed * scale);
+    }
+
+    private static float ArmHealth01(Player player)
+    {
+        try
+        {
+            if (player.HealthController is ActiveHealthController health)
+            {
+                float left = HealthFraction(health, EBodyPart.LeftArm);
+                float right = HealthFraction(health, EBodyPart.RightArm);
+                // The worse arm dictates manipulation speed.
+                return Mathf.Min(left, right);
+            }
+        }
+        catch { }
+        return 1f;
+    }
+
+    private static float HealthFraction(ActiveHealthController health, EBodyPart part)
+    {
+        var value = health.GetBodyPartHealth(part);
+        return value.Maximum > 0f ? Mathf.Clamp01(value.Current / value.Maximum) : 1f;
+    }
+}
+
+internal class Patch_ReloadSpeed : ModulePatch
+{
+    protected override MethodBase GetTargetMethod()
+        => typeof(Player.FirearmController).GetMethod("ReloadMag", BindingFlags.Instance | BindingFlags.Public);
 
     [PatchPrefix]
-    private static void Prefix(Player.FirearmController __instance)
-    {
-        if (!HandlingConfig.Enabled.Value || !HandlingConfig.ReloadEfficiencyEnabled.Value)
-        {
-            return;
-        }
+    private static void Prefix(Player.FirearmController __instance) => ReloadArmScale.Apply(__instance);
+}
 
-        if (_buffInfoField == null || _reloadSpeedField == null || _playerField == null)
-        {
-            return;
-        }
+internal class Patch_QuickReloadSpeed : ModulePatch
+{
+    protected override MethodBase GetTargetMethod()
+        => typeof(Player.FirearmController).GetMethod("QuickReloadMag", BindingFlags.Instance | BindingFlags.Public);
 
-        object buffInfo = _buffInfoField.GetValue(__instance);
-        if (buffInfo == null)
-        {
-            return;
-        }
-
-        Player player = _playerField.GetValue(__instance) as Player;
-        if (player == null || !player.IsYourPlayer)
-        {
-            return;
-        }
-
-        float baseReloadSpeed = (float)_reloadSpeedField.GetValue(buffInfo);
-        float modifiedSpeed = baseReloadSpeed;
-
-        // Scale by ergonomics (efficiency). Higher ergonomics = faster reload.
-        // TotalErgonomics typically ranges 0-100. We map it to a multiplier.
-        float ergo = __instance.TotalErgonomics;
-        float ergoMultiplier = 1f + (ergo / 100f) * HandlingConfig.ReloadEfficiencyInfluence.Value;
-        modifiedSpeed *= ergoMultiplier;
-
-        // Sprint penalty: reloading while sprinting is slower.
-        bool isSprinting = player.MovementContext?.IsSprintEnabled ?? false;
-        if (isSprinting)
-        {
-            float sprintPenalty = Mathf.Clamp01(HandlingConfig.ReloadSprintPenalty.Value);
-            modifiedSpeed *= (1f - sprintPenalty);
-        }
-
-        _reloadSpeedField.SetValue(buffInfo, modifiedSpeed);
-    }
+    [PatchPrefix]
+    private static void Prefix(Player.FirearmController __instance) => ReloadArmScale.Apply(__instance);
 }

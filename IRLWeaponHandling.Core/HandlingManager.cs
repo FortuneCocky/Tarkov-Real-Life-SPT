@@ -149,6 +149,10 @@ internal static class HandlingManager
             _wasActive = true;
             HandlingState.Update(player);
 
+            bool handsTransition = false;
+            try { handsTransition = player.HandsController?.IsHandsProcessing() ?? false; } catch { }
+            ProceduralHipSystem.SetHandsTransition(handsTransition);
+
             // Detect weapon swap — reset procedural state so the new weapon
             // starts from a clean position instead of inheriting stale
             // offsets from the previous weapon. This fixes pistols (and
@@ -158,26 +162,31 @@ internal static class HandlingManager
             {
                 _lastFirearm = currentFirearm;
                 ProceduralHipSystem.Reset();
-                DeadzoneSystem.Reset();
-                WeaponDeadzoneSystem.Reset();
+                ProceduralHipSystem.SuppressCameraFollow(1.5f);
                 SwaySystem.Reset();
                 CameraLagSystem.Reset(player.ProceduralWeaponAnimation);
             }
 
             MotionTracker.Update(player, dt);
+            InjuryHandlingSystem.Tick(player, dt);
+            LocomotionGaitSystem.Tick(player, dt);
+            TurnInPlaceSystem.Tick(player, dt);
+            DynamicFovSystem.Tick(player, dt);
+            AdrenalineSystem.Tick(player, dt);
             SprintCancelSystem.Tick(player);
-            LegCrippleSystem.Tick(player, dt);
-            SwaySystem.TickProceduralSway(dt);
             if (HandlingState.HasWeapon)
             {
                 AimingSystem.Apply();
                 SwaySystem.Apply();
             }
-            DeadzoneSystem.Tick(player, dt);
             ProceduralHipSystem.Tick(player, dt);
             MomentumSystem.Tick(player, dt);
             LeanSystem.Tick(player, dt);
-            CameraLagSystem.Tick(dt);
+            if (ProceduralHipSystem.ControlsCamera)
+                CameraLagSystem.Reset(player.ProceduralWeaponAnimation);
+            else
+                CameraLagSystem.Tick(dt);
+            FluidMovementSystem.Tick(player, dt);
         }
     }
 
@@ -198,15 +207,19 @@ internal static class HandlingManager
         _wasFreeLooking = false;
         _freeLookReturnActive = false;
         _lastFirearm = null;
-        DeadzoneSystem.Reset();
-        WeaponDeadzoneSystem.Reset();
         SwaySystem.Reset();
         ShotSystem.Reset();
         CameraLagSystem.Reset(player?.ProceduralWeaponAnimation);
         LeanSystem.Reset();
         MomentumSystem.Reset();
-        LegCrippleSystem.Reset();
+        LocomotionGaitSystem.Reset();
+        TurnInPlaceSystem.Reset();
+        DynamicFovSystem.Reset();
+        AdrenalineSystem.Reset();
+        InjuryHandlingSystem.Reset();
         MotionTracker.Reset(player);
+        FluidMovementSystem.Reset();
+        HeadAttachSystem.Reset();
         if (player != null && player.ProceduralWeaponAnimation != null)
         {
             player.ProceduralWeaponAnimation.UpdateWeaponVariables();

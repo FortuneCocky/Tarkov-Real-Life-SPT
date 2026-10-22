@@ -43,6 +43,11 @@ internal static class MotionTracker
 
 	public static void Update(Player player, float deltaTime)
 	{
+		// Smoothing integrates with a capped dt so hitches don't overshoot,
+		// but the rate measurement must use the real frame time — dividing a
+		// 200ms frame's rotation delta by a 66ms clamp inflates turn rates up
+		// to 3x, which spikes every rate-driven layer (whip, lead, lean).
+		float rateDt = Mathf.Max(deltaTime, 0.0033333334f);
 		deltaTime = Mathf.Clamp(deltaTime, 0.0033333334f, 1f / 15f);
 		Vector2 rotation = player.Rotation;
 		Vector3 position = player.Position;
@@ -70,8 +75,18 @@ internal static class MotionTracker
 		{
 			num2 = 0f;
 		}
-		float target = Mathf.Clamp(num / deltaTime, -720f, 720f);
-		float target2 = Mathf.Clamp(num2 / deltaTime, -720f, 720f);
+		if (Systems.ShotSystem.InShotRecovery)
+		{
+			// Recoil also rotates player.Rotation. While a shot's kick is active,
+			// decay the rates instead of feeding the kick into the procedural
+			// motion layers (whip, turn lead, pivot tracking) as fake mouse input.
+			_yawRate = Smooth(_yawRate, 0f, deltaTime, 20f);
+			_pitchRate = Smooth(_pitchRate, 0f, deltaTime, 20f);
+			_yawRateSlow = Smooth(_yawRateSlow, 0f, deltaTime, 20f);
+			return;
+		}
+		float target = Mathf.Clamp(num / rateDt, -720f, 720f);
+		float target2 = Mathf.Clamp(num2 / rateDt, -720f, 720f);
 		_yawRate = Smooth(_yawRate, target, deltaTime, 14f);
 		_pitchRate = Smooth(_pitchRate, target2, deltaTime, 14f);
 		_yawRateSlow = Smooth(_yawRateSlow, target, deltaTime, 5f);

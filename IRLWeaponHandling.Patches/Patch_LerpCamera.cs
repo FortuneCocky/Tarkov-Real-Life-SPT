@@ -34,7 +34,34 @@ internal class Patch_LerpCamera : ModulePatch
             return;
         }
 
+        // Firearms only — non-weapon hand states (eating, drinking, planting)
+        // must keep their own camera animation.
+        if (player.HandsController is not Player.FirearmController)
+        {
+            return;
+        }
+
         ApplyCamera(__instance);
+        ClampCameraPushback(__instance, player);
+    }
+
+    // Vanilla TurnAway pushes the camera backward to keep the sight line when
+    // the barrel is blocked — far enough that you end up staring at the back
+    // of your own helmet/arms. Clamp the camera to stay at least slightly in
+    // front of the head's forward plane; the weapon still collapses normally.
+    internal static void ClampCameraPushback(ProceduralWeaponAnimation pwa, Player player)
+    {
+        Transform cam = pwa.HandsContainer?.CameraTransform;
+        Transform head = player?.PlayerBones?.Head?.Original;
+        if (cam == null || head == null)
+            return;
+
+        // forward axis = view direction, closest thing to the face plane.
+        Vector3 rel = cam.position - head.position;
+        float fwd = Vector3.Dot(rel, cam.forward);
+        const float minForward = 0.02f;
+        if (fwd < minForward)
+            cam.position += cam.forward * (minForward - fwd);
     }
 
     internal static void ApplyCamera(ProceduralWeaponAnimation __instance)

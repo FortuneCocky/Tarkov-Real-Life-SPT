@@ -28,6 +28,15 @@ internal class Patch_SetHeadRotation : ModulePatch
 			return;
 		}
 
+		// No firearm in hands (eating, drinking, planting, meds, throwables,
+		// empty hands) — pass the rotation through untouched so those
+		// animations own the camera. Still record it so state stays sane.
+		if (player.HandsController is not Player.FirearmController)
+		{
+			HandlingState.HeadRotation = headRot;
+			return;
+		}
+
 		// Skip all camera modifications during free look — let vanilla handle it
 		if (player.MouseLookControl)
 		{
@@ -43,18 +52,26 @@ internal class Patch_SetHeadRotation : ModulePatch
 			return;
 		}
 
-		// Apply weapon deadzone (Tarkov Real Life cone-clamp) first.
-		// This is a direct camera clamp that works in all states.
-		headRot = WeaponDeadzoneSystem.Modify(headRot);
+		// Base rotation: ProceduralHipSystem owns the weapon deadzone for both
+		// hip and ADS, detaching the camera from the raw mouse rotation.
+		Vector3 baseRot = ProceduralHipSystem.Modify(headRot);
 
-		// Base rotation: ADS uses DeadzoneSystem, hip uses ProceduralHipSystem.
-		// Both detach the camera from the raw mouse rotation.
-		Vector3 baseRot = HandlingState.IsAiming
-			? DeadzoneSystem.Modify(headRot)
-			: ProceduralHipSystem.Modify(headRot);
+		if (ProceduralHipSystem.ControlsCamera)
+		{
+			headRot = baseRot;
+		}
+		else
+		{
+			// Apply momentum, camera lag, and lean on top of the detached camera.
+			headRot = LeanSystem.Modify(CameraLagSystem.Modify(MomentumSystem.Modify(baseRot)));
 
-		// Apply momentum, camera lag, and lean on top of the detached camera.
-		headRot = LeanSystem.Modify(CameraLagSystem.Modify(MomentumSystem.Modify(baseRot)));
+			// Apply fluid movement camera bob (walk bob, landing dip, crouch dip).
+			headRot = FluidMovementSystem.Modify(headRot);
+		}
+
+		headRot = LocomotionGaitSystem.ModifyCamera(headRot);
+		headRot = TurnInPlaceSystem.ModifyCamera(headRot);
+		headRot = HeadAttachSystem.ApplyShotShake(headRot);
 		HandlingState.HeadRotation = headRot;
 	}
 }

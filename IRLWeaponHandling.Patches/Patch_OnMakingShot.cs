@@ -20,5 +20,6 @@ internal class Patch_OnMakingShot : ModulePatch
 		{
 			ShotSystem.OnShot();
 		}
+		AdrenalineSystem.OnShot(__instance, HandlingManager.LocalPlayer());
 	}
 }

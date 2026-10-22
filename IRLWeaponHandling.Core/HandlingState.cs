@@ -28,6 +28,14 @@ internal static class HandlingState
 
 	public static bool IsSprinting { get; private set; }
 
+	public static bool IsHoldingBreath { get; private set; }
+
+	/// <summary>Recoil Control skill, 0 = level 0, 1 = elite (51).</summary>
+	public static float RecoilSkill01 { get; private set; }
+
+	/// <summary>Aim Drills skill, 0 = level 0, 1 = elite (51).</summary>
+	public static float AimSkill01 { get; private set; }
+
 	public static bool HasWeapon
 	{
 		get
@@ -87,12 +95,24 @@ internal static class HandlingState
 			Stamina01 = physical.Stamina?.NormalValue ?? 1f;
 			Oxygen01 = physical.Oxygen?.NormalValue ?? 1f;
 		}
+		try
+		{
+			SkillManager skills = player.Skills;
+			RecoilSkill01 = skills?.RecoilControl != null ? Mathf.Clamp01(skills.RecoilControl.Level / 51f) : 0f;
+			AimSkill01 = skills?.AimDrills != null ? Mathf.Clamp01(skills.AimDrills.Level / 51f) : 0f;
+		}
+		catch
+		{
+			RecoilSkill01 = 0f;
+			AimSkill01 = 0f;
+		}
 		MovementContext movementContext = player.MovementContext;
 		if (movementContext != null)
 		{
 			float num = Mathf.Max(movementContext.MaxSpeed, 0.1f);
 			MovementSpeed01 = Mathf.Clamp01(movementContext.CharacterMovementSpeed / num);
 			IsSprinting = movementContext.IsSprintEnabled;
+			IsHoldingBreath = movementContext.IsHoldingBreath();
 		}
 	}
 
@@ -115,6 +135,9 @@ internal static class HandlingState
 		Oxygen01 = 1f;
 		MovementSpeed01 = 0f;
 		IsSprinting = false;
+		IsHoldingBreath = false;
+		RecoilSkill01 = 0f;
+		AimSkill01 = 0f;
 		HeadRotation = Vector3.zero;
 	}
 }

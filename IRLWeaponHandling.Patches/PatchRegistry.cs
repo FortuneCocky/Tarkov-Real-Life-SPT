@@ -16,7 +16,12 @@ internal static class PatchRegistry
 			(ModulePatch)(object)new Patch_SetHeadRotation(),
 			(ModulePatch)(object)new Patch_OnMakingShot(),
 			(ModulePatch)(object)new Patch_UpdateWeaponVariables(),
-			(ModulePatch)(object)new Patch_CalculateCameraPosition()
+			(ModulePatch)(object)new Patch_CalculateCameraPosition(),
+			(ModulePatch)(object)new Patch_ReloadSpeed(),
+			(ModulePatch)(object)new Patch_QuickReloadSpeed(),
+
+			(ModulePatch)(object)new Patch_CustomItemSkinSetIsCustom(),
+			(ModulePatch)(object)new Patch_CustomItemSkinProceed()
 		})
 		{
 			try
