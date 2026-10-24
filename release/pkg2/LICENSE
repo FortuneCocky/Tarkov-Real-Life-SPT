@@ -1,0 +1,41 @@
+TrueView License
+
+Copyright (c) 2026 FortuneCocky
+
+This project (TrueView) is a derivative of TarkovIRL - Weapons Handling
+Mod, originally created by adishee (https://github.com/crm85/TarkovIRL-public).
+Portions of the weapon deadzone and handling systems were ported from
+TarkovIRL and remain attributed to its original author.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to
+install and use the Software for personal, non-commercial purposes only,
+subject to the following conditions:
+
+1. MODIFICATION: You may not modify, adapt, translate, reverse engineer, or
+   create derivative works based on the Software without prior written
+   permission from the copyright holder (FortuneCocky).
+
+2. REDISTRIBUTION: You may not copy, redistribute, republish, upload, or
+   otherwise make the Software or derivative works available on any other
+   site or service without prior written permission from the copyright
+   holder.
+
+3. ATTRIBUTION: Any permitted use must retain this license notice and the
+   attribution to adishee for the portions ported from TarkovIRL.
+
+4. COMMERCIAL USE: Commercial use of the Software is prohibited without
+   prior written permission from the copyright holder.
+
+To request permission, contact the copyright holder via:
+
+- GitHub: https://github.com/FortuneCocky/TrueView-SPT (issues)
+- Discord: Isaiahnohart (user ID 138781947550892032)
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
