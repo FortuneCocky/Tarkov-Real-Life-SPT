@@ -1,4 +1,4 @@
-# TarkovRL — Tarkov Real Life
+# TrueView — TrueView
 
 A BepInEx plugin for **SPT 4.1.x** that makes weapon handling feel real: your gun has weight, it drifts, it lags behind your aim, and your body moves like a person's — not a tripod's.
 
@@ -23,9 +23,9 @@ A BepInEx plugin for **SPT 4.1.x** that makes weapon handling feel real: your gu
 
 ## Install
 
-1. Download the latest `TarkovRL-x.x.x.zip` from [Releases](https://github.com/FortuneCocky/TarkovRL-SPT/releases)
+1. Download the latest `TrueView-x.x.x.zip` from [Releases](https://github.com/FortuneCocky/TrueView-SPT/releases)
 2. Extract into your SPT install folder (merge the `BepInEx` folder)
-3. Launch the game once — settings appear at `BepInEx/config/com.tarkovrl.cfg`
+3. Launch the game once — settings appear at `BepInEx/config/com.trueview.cfg`
 
 ## Compatibility
 
